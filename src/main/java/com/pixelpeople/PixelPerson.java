@@ -138,8 +138,8 @@ public class PixelPerson extends PathfinderMob {
     }
 
     @Override
-    public EntityDimensions getDefaultDimensions(Pose pose) {
-        return getState() == STANDING ? super.getDefaultDimensions(pose) : EntityDimensions.scalable(1.6f, 0.5f);
+    public EntityDimensions getDimensions(Pose pose) {
+        return getState() == STANDING ? super.getDimensions(pose) : EntityDimensions.scalable(1.6f, 0.5f);
     }
 
     @Override
