@@ -47,9 +47,15 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
 
     @Override
     public void render(PixelPerson e, float entityYaw, float pt, PoseStack ps, MultiBufferSource buffer, int light) {
-        VertexConsumer skin = buffer.getBuffer(RenderType.entityCutoutNoCull(SKIN));
-        VertexConsumer flesh = buffer.getBuffer(RenderType.entityCutoutNoCull(FLESH));
         int overlay = LivingEntityRenderer.getOverlayCoords(e, 0f);
+        // The buffer source closes the previous buffer when another render type is requested,
+        // so draw in two separate passes: first everything with the skin, then everything red.
+        draw(e, pt, ps, buffer.getBuffer(RenderType.entityCutoutNoCull(SKIN)), false, light, overlay);
+        draw(e, pt, ps, buffer.getBuffer(RenderType.entityCutoutNoCull(FLESH)), true, light, overlay);
+        super.render(e, entityYaw, pt, ps, buffer, light);
+    }
+
+    private void draw(PixelPerson e, float pt, PoseStack ps, VertexConsumer vc, boolean flesh, int light, int overlay) {
         float s = PixelModel.SCALE;
 
         // ---- flying pixels (world aligned) ----
@@ -67,8 +73,8 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
             PoseStack.Pose pose = ps.last();
             for (int f = 0; f < 6; f++) {
                 int tex = PixelModel.TEX[d.cube * 6 + f];
-                if (tex >= 0) face(skin, pose, 0f, 0f, 0f, f, tex, 64f, light, overlay);
-                else face(flesh, pose, 0f, 0f, 0f, f, PixelModel.fleshTex(d.cube), 4f, light, overlay);
+                if (!flesh && tex >= 0) face(vc, pose, 0f, 0f, 0f, f, tex, 64f, light, overlay);
+                else if (flesh && tex < 0) face(vc, pose, 0f, 0f, 0f, f, PixelModel.fleshTex(d.cube), 4f, light, overlay);
             }
             ps.popPose();
         }
@@ -89,10 +95,10 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
                 for (int f = 0; f < 6; f++) {
                     int nb = PixelModel.NEIGH[b + f];
                     if (nb < 0) {
-                        face(skin, pose, PixelModel.CX[i], PixelModel.CY[i], PixelModel.CZ[i], f,
+                        if (!flesh) face(vc, pose, PixelModel.CX[i], PixelModel.CY[i], PixelModel.CZ[i], f,
                                 PixelModel.TEX[b + f], 64f, light, overlay);
-                    } else if (e.detached.get(nb)) {
-                        face(flesh, pose, PixelModel.CX[i], PixelModel.CY[i], PixelModel.CZ[i], f,
+                    } else if (flesh && e.detached.get(nb)) {
+                        face(vc, pose, PixelModel.CX[i], PixelModel.CY[i], PixelModel.CZ[i], f,
                                 PixelModel.fleshTex(i), 4f, light, overlay);
                     }
                 }
@@ -100,8 +106,6 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
             ps.popPose();
         }
         ps.popPose();
-
-        super.render(e, entityYaw, pt, ps, buffer, light);
     }
 
     private static void face(VertexConsumer vc, PoseStack.Pose pose, float x, float y, float z,
