@@ -1,0 +1,25 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="MIT"
+
+[[mods]]
+modId="pixelpeople"
+version="1.0.0"
+displayName="Pixel People"
+description='''
+Ragdoll people made of single-pixel cubes. Hit them and the pixels fly off.
+'''
+
+[[dependencies.pixelpeople]]
+modId="neoforge"
+type="required"
+versionRange="[21.1.0,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.pixelpeople]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1]"
+ordering="NONE"
+side="BOTH"

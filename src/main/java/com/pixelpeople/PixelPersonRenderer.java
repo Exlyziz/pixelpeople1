@@ -1,0 +1,115 @@
+package com.pixelpeople;
+
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.mojang.math.Axis;
+import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.client.renderer.RenderType;
+import net.minecraft.client.renderer.entity.EntityRenderer;
+import net.minecraft.client.renderer.entity.EntityRendererProvider;
+import net.minecraft.client.renderer.entity.LivingEntityRenderer;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.util.Mth;
+import org.joml.Matrix4f;
+import org.joml.Quaternionf;
+
+/** Draws every surviving pixel as a small cube (only its visible faces), plus the flying debris. */
+public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
+    private static final ResourceLocation TEXTURE =
+            ResourceLocation.fromNamespaceAndPath(PixelPeopleMod.MODID, "textures/entity/pixel_person.png");
+
+    private static final Matrix4f[] MATS = new Matrix4f[PixelModel.PARTS];
+    static {
+        for (int i = 0; i < MATS.length; i++) MATS[i] = new Matrix4f();
+    }
+
+    // face normal and the two tangent axes of each face
+    private static final float[][] N  = {{0,0,1},{0,0,-1},{-1,0,0},{1,0,0},{0,1,0},{0,-1,0}};
+    private static final float[][] TA = {{1,0,0},{1,0,0},{0,0,1},{0,0,1},{1,0,0},{1,0,0}};
+    private static final float[][] TB = {{0,1,0},{0,1,0},{0,1,0},{0,1,0},{0,0,1},{0,0,1}};
+    private static final float[] SA = {-1, 1, 1, -1};
+    private static final float[] SB = {-1, -1, 1, 1};
+
+    public PixelPersonRenderer(EntityRendererProvider.Context context) {
+        super(context);
+        this.shadowRadius = 0.4f;
+    }
+
+    @Override
+    public ResourceLocation getTextureLocation(PixelPerson entity) {
+        return TEXTURE;
+    }
+
+    @Override
+    public void render(PixelPerson e, float entityYaw, float pt, PoseStack ps, MultiBufferSource buffer, int light) {
+        VertexConsumer vc = buffer.getBuffer(RenderType.entityCutoutNoCull(TEXTURE));
+        int overlay = LivingEntityRenderer.getOverlayCoords(e, 0f);
+        float s = PixelModel.SCALE;
+
+        // ---- flying pixels (world aligned) ----
+        double ex = Mth.lerp(pt, e.xo, e.getX());
+        double ey = Mth.lerp(pt, e.yo, e.getY());
+        double ez = Mth.lerp(pt, e.zo, e.getZ());
+        for (PixelPerson.Debris d : e.debris) {
+            int left = d.life - d.age;
+            float sc = left < 8 ? Math.max(0f, left / 8f) : 1f; // shrink away in the last moments
+            if (sc <= 0f) continue;
+            ps.pushPose();
+            ps.translate(Mth.lerp(pt, d.xo, d.x) - ex, Mth.lerp(pt, d.yo, d.y) - ey, Mth.lerp(pt, d.zo, d.z) - ez);
+            ps.mulPose(new Quaternionf().rotationXYZ(d.rx, d.ry, d.rz));
+            ps.scale(s * sc, s * sc, s * sc);
+            int base = d.cube * 6;
+            int fallback = -1;
+            for (int f = 0; f < 6; f++) if (PixelModel.TEX[base + f] >= 0) { fallback = PixelModel.TEX[base + f]; break; }
+            PoseStack.Pose pose = ps.last();
+            for (int f = 0; f < 6; f++) {
+                int tex = PixelModel.TEX[base + f];
+                face(vc, pose, 0f, 0f, 0f, f, tex >= 0 ? tex : fallback, light, overlay);
+            }
+            ps.popPose();
+        }
+
+        // ---- the body ----
+        float bodyYaw = Mth.rotLerp(pt, e.yBodyRotO, e.yBodyRot);
+        ps.pushPose();
+        ps.mulPose(Axis.YP.rotationDegrees(-bodyYaw));
+        ps.scale(s, s, s);
+        PixelPose.compute(e, pt, MATS);
+        for (int p = 0; p < PixelModel.PARTS; p++) {
+            ps.pushPose();
+            ps.mulPose(MATS[p]);
+            PoseStack.Pose pose = ps.last();
+            for (int i = PixelModel.START[p]; i < PixelModel.START[p + 1]; i++) {
+                if (e.detached.get(i)) continue;
+                int b = i * 6;
+                for (int f = 0; f < 6; f++) {
+                    int tex = PixelModel.TEX[b + f];
+                    if (tex >= 0) face(vc, pose, PixelModel.CX[i], PixelModel.CY[i], PixelModel.CZ[i], f, tex, light, overlay);
+                }
+            }
+            ps.popPose();
+        }
+        ps.popPose();
+
+        super.render(e, entityYaw, pt, ps, buffer, light);
+    }
+
+    private static void face(VertexConsumer vc, PoseStack.Pose pose, float x, float y, float z,
+                             int f, int tex, int light, int overlay) {
+        float u = ((tex & 255) + 0.5f) / 64f;
+        float v = ((tex >> 8) + 0.5f) / 64f;
+        float[] n = N[f], a = TA[f], b = TB[f];
+        for (int k = 0; k < 4; k++) {
+            float sa = SA[k] * 0.5f, sb = SB[k] * 0.5f;
+            vc.addVertex(pose,
+                            x + n[0] * 0.5f + a[0] * sa + b[0] * sb,
+                            y + n[1] * 0.5f + a[1] * sa + b[1] * sb,
+                            z + n[2] * 0.5f + a[2] * sa + b[2] * sb)
+                    .setColor(255, 255, 255, 255)
+                    .setUv(u, v)
+                    .setOverlay(overlay)
+                    .setLight(light)
+                    .setNormal(pose, n[0], n[1], n[2]);
+        }
+    }
+}
