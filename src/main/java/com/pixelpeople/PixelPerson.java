@@ -70,6 +70,10 @@ public class PixelPerson extends PathfinderMob {
     // ---- client-only animation state ----
     public int stateTicks;
     public float lie, lieO, sit, sitO, drop, dropO, panic, panicO, bounce, bounceO, bounceV;
+    public float lieV, twist, twistO, twistV;
+    private final float[] offX = new float[6], offZ = new float[6];
+    /** How strongly each part lags behind when the whole body rotates (head lags most). */
+    private static final float[] LAG = {0.5f, 0f, 0.3f, 0.3f, 0.15f, 0.15f};
     public final float[] sx = new float[6], sz = new float[6], sxO = new float[6], szO = new float[6];
     private final float[] vx = new float[6], vz = new float[6];
     public final List<Debris> debris = new ArrayList<>();
@@ -138,8 +142,8 @@ public class PixelPerson extends PathfinderMob {
     }
 
     @Override
-    public EntityDimensions getDimensions(Pose pose) {
-        return getState() == STANDING ? super.getDimensions(pose) : EntityDimensions.scalable(1.6f, 0.5f);
+    public EntityDimensions getDefaultDimensions(Pose pose) {
+        return getState() == STANDING ? super.getDefaultDimensions(pose) : EntityDimensions.scalable(1.6f, 0.5f);
     }
 
     @Override
@@ -157,6 +161,13 @@ public class PixelPerson extends PathfinderMob {
         super.onSyncedDataUpdated(key);
         if (DATA_STATE.equals(key) && level().isClientSide) {
             stateTicks = 0;
+            lieV = 0f;
+            if (getState() == DOWN) { // every fall ends in a different dropped-doll pose
+                for (int i = 0; i < 6; i++) {
+                    offX[i] = i == PixelModel.BODY ? 0f : (random.nextFloat() - 0.5f) * 0.9f;
+                    offZ[i] = i == PixelModel.BODY ? 0f : (random.nextFloat() - 0.5f) * 0.7f;
+                }
+            }
             refreshDimensions();
         }
     }
@@ -222,7 +233,7 @@ public class PixelPerson extends PathfinderMob {
         Vec3 dir = hitDirection(source);
         Vec3 pos = hitPosition(source);
         float strength = Mth.clamp(amount / 4f, 0.4f, 3f);
-        int count = Mth.clamp(Math.round(amount * 2.2f) + 1, 2, 40);
+        int count = Mth.clamp(Math.round(amount * 3.0f) + 2, 3, 70);
         int[] cubes = detachNear(pos, count);
 
         boolean heavy = amount >= 4f
@@ -379,18 +390,33 @@ public class PixelPerson extends PathfinderMob {
     }
 
     public void clientHit(int[] cubes, Vec3 dir, float strength) {
+        float keep = cubes.length > 250 ? 250f / cubes.length : 1f; // death: only some pixels become debris
         for (int idx : cubes) {
             if (!detached.get(idx)) {
                 detached.set(idx);
-                spawnDebris(idx, dir, strength);
+                if (keep >= 1f || random.nextFloat() < keep) spawnDebris(idx, dir, strength);
             }
         }
         // jerk every limb: standing people flinch, lying people get tossed around like dolls
+        boolean lying = getState() != STANDING;
+        float k = lying ? 1.7f : 0.9f;
         for (int i = 0; i < 6; i++) {
-            vx[i] += (random.nextFloat() - 0.5f) * 0.9f * strength;
-            vz[i] += (random.nextFloat() - 0.5f) * 0.9f * strength;
+            vx[i] += (random.nextFloat() - 0.5f) * k * strength;
+            vz[i] += (random.nextFloat() - 0.5f) * k * strength;
         }
-        if (getState() != STANDING) bounceV += 1.2f * strength;
+        if (lying) {
+            bounceV += 1.2f * strength;
+            twistV += (random.nextFloat() - 0.5f) * 0.25f * strength;
+        }
+    }
+
+    private void landed(float v) {
+        for (int i = 0; i < 6; i++) {
+            vx[i] += (random.nextFloat() - 0.5f) * v * 3f;
+            vz[i] += (random.nextFloat() - 0.5f) * v * 3f;
+        }
+        bounceV += v * 3f;
+        twistV += (random.nextFloat() - 0.5f) * v * 0.6f;
     }
 
     private static float smooth(float x) {
@@ -400,14 +426,23 @@ public class PixelPerson extends PathfinderMob {
 
     private void clientTick() {
         stateTicks++;
-        lieO = lie; sitO = sit; dropO = drop; panicO = panic; bounceO = bounce;
+        lieO = lie; sitO = sit; dropO = drop; panicO = panic; bounceO = bounce; twistO = twist;
 
         int st = getState();
         if (st == DOWN) {
-            lie = Math.min(1f, lie + 0.25f);
+            // topple like a real body: gravity accelerates the fall, the ground makes it bounce
+            lieV += 0.05f;
+            lie += lieV;
+            if (lie >= 1f) {
+                lie = 1f;
+                boolean hard = lieV > 0.12f;
+                if (hard) landed(lieV);
+                lieV = hard ? -lieV * 0.3f : 0f;
+            }
             sit = 0f;
             drop = lie;
         } else if (st == GETTING_UP) {
+            lieV = 0f;
             float t = Math.min(1f, stateTicks / (float) GETUP_TICKS);
             if (isFaceDown()) {            // push up like a plank
                 lie = 1f - smooth(t);
@@ -423,6 +458,7 @@ public class PixelPerson extends PathfinderMob {
                 drop = sit;
             }
         } else {
+            lieV = 0f;
             lie = Math.max(0f, lie - 0.25f);
             sit = 0f;
             drop = lie;
@@ -432,15 +468,25 @@ public class PixelPerson extends PathfinderMob {
                 && getTrait() != BRAVE) ? 1f : 0f;
         panic += (panicTarget - panic) * 0.25f;
 
+        // limb springs: firm while standing, loose and floppy while lying
+        float side = isFaceDown() ? 1f : -1f;
+        float dR = side * Mth.HALF_PI * (lie - lieO);   // how much the whole body just rotated
+        float k = 0.22f - 0.10f * lie;
+        float c = 0.12f - 0.04f * lie;
         for (int i = 0; i < 6; i++) {
             sxO[i] = sx[i];
             szO[i] = sz[i];
-            float rx = PixelPose.restX(i) * lie, rz = PixelPose.restZ(i) * lie;
-            vx[i] += -0.22f * (sx[i] - rx) - 0.12f * vx[i];
-            vz[i] += -0.22f * (sz[i] - rz) - 0.12f * vz[i];
+            vx[i] += -dR * LAG[i];                      // inertia: limbs lag behind the rotating body
+            float rx = (PixelPose.restX(i) + offX[i]) * lie;
+            float rz = (PixelPose.restZ(i) + offZ[i]) * lie;
+            vx[i] += -k * (sx[i] - rx) - c * vx[i];
+            vz[i] += -k * (sz[i] - rz) - c * vz[i];
             sx[i] += vx[i];
             sz[i] += vz[i];
         }
+
+        twistV += -0.05f * twist - 0.08f * twistV;
+        twist += twistV;
 
         bounceV -= 0.35f;
         bounce += bounceV;

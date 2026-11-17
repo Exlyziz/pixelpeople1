@@ -21,6 +21,7 @@ public final class PixelPose {
         float drop = Mth.lerp(pt, e.dropO, e.drop);
         float panic = Mth.lerp(pt, e.panicO, e.panic);
         float bounce = Mth.lerp(pt, e.bounceO, e.bounce);
+        float twist = Mth.lerp(pt, e.twistO, e.twist);
         float side = e.isFaceDown() ? 1f : -1f; // -1: falls on its back, +1: falls on its face
         float age = e.tickCount + pt;
 
@@ -38,6 +39,7 @@ public final class PixelPose {
         Matrix4f root = new Matrix4f()
                 .translate(0f, -10f * drop + bounce * lie, -side * 4f * lie)
                 .translate(0f, 12f, 0f)
+                .rotateY(twist * lie)
                 .rotateX(side * Mth.HALF_PI * lie)
                 .translate(0f, -12f, 0f);
 

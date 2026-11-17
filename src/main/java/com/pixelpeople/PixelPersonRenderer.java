@@ -13,10 +13,15 @@ import net.minecraft.util.Mth;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 
-/** Draws every surviving pixel as a small cube (only its visible faces), plus the flying debris. */
+/**
+ * Draws the solid pixel body. A face is drawn when nothing is attached next to it:
+ * on the outside of the body it shows the skin pixel, where a neighbour fell off it shows red flesh.
+ */
 public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
-    private static final ResourceLocation TEXTURE =
+    private static final ResourceLocation SKIN =
             ResourceLocation.fromNamespaceAndPath(PixelPeopleMod.MODID, "textures/entity/pixel_person.png");
+    private static final ResourceLocation FLESH =
+            ResourceLocation.fromNamespaceAndPath(PixelPeopleMod.MODID, "textures/entity/flesh.png");
 
     private static final Matrix4f[] MATS = new Matrix4f[PixelModel.PARTS];
     static {
@@ -37,12 +42,13 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
 
     @Override
     public ResourceLocation getTextureLocation(PixelPerson entity) {
-        return TEXTURE;
+        return SKIN;
     }
 
     @Override
     public void render(PixelPerson e, float entityYaw, float pt, PoseStack ps, MultiBufferSource buffer, int light) {
-        VertexConsumer vc = buffer.getBuffer(RenderType.entityCutoutNoCull(TEXTURE));
+        VertexConsumer skin = buffer.getBuffer(RenderType.entityCutoutNoCull(SKIN));
+        VertexConsumer flesh = buffer.getBuffer(RenderType.entityCutoutNoCull(FLESH));
         int overlay = LivingEntityRenderer.getOverlayCoords(e, 0f);
         float s = PixelModel.SCALE;
 
@@ -58,13 +64,11 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
             ps.translate(Mth.lerp(pt, d.xo, d.x) - ex, Mth.lerp(pt, d.yo, d.y) - ey, Mth.lerp(pt, d.zo, d.z) - ez);
             ps.mulPose(new Quaternionf().rotationXYZ(d.rx, d.ry, d.rz));
             ps.scale(s * sc, s * sc, s * sc);
-            int base = d.cube * 6;
-            int fallback = -1;
-            for (int f = 0; f < 6; f++) if (PixelModel.TEX[base + f] >= 0) { fallback = PixelModel.TEX[base + f]; break; }
             PoseStack.Pose pose = ps.last();
             for (int f = 0; f < 6; f++) {
-                int tex = PixelModel.TEX[base + f];
-                face(vc, pose, 0f, 0f, 0f, f, tex >= 0 ? tex : fallback, light, overlay);
+                int tex = PixelModel.TEX[d.cube * 6 + f];
+                if (tex >= 0) face(skin, pose, 0f, 0f, 0f, f, tex, 64f, light, overlay);
+                else face(flesh, pose, 0f, 0f, 0f, f, PixelModel.fleshTex(d.cube), 4f, light, overlay);
             }
             ps.popPose();
         }
@@ -83,8 +87,14 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
                 if (e.detached.get(i)) continue;
                 int b = i * 6;
                 for (int f = 0; f < 6; f++) {
-                    int tex = PixelModel.TEX[b + f];
-                    if (tex >= 0) face(vc, pose, PixelModel.CX[i], PixelModel.CY[i], PixelModel.CZ[i], f, tex, light, overlay);
+                    int nb = PixelModel.NEIGH[b + f];
+                    if (nb < 0) {
+                        face(skin, pose, PixelModel.CX[i], PixelModel.CY[i], PixelModel.CZ[i], f,
+                                PixelModel.TEX[b + f], 64f, light, overlay);
+                    } else if (e.detached.get(nb)) {
+                        face(flesh, pose, PixelModel.CX[i], PixelModel.CY[i], PixelModel.CZ[i], f,
+                                PixelModel.fleshTex(i), 4f, light, overlay);
+                    }
                 }
             }
             ps.popPose();
@@ -95,9 +105,9 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
     }
 
     private static void face(VertexConsumer vc, PoseStack.Pose pose, float x, float y, float z,
-                             int f, int tex, int light, int overlay) {
-        float u = ((tex & 255) + 0.5f) / 64f;
-        float v = ((tex >> 8) + 0.5f) / 64f;
+                             int f, int tex, float texSize, int light, int overlay) {
+        float u = ((tex & 255) + 0.5f) / texSize;
+        float v = ((tex >> 8) + 0.5f) / texSize;
         float[] n = N[f], a = TA[f], b = TB[f];
         for (int k = 0; k < 4; k++) {
             float sa = SA[k] * 0.5f, sb = SB[k] * 0.5f;
