@@ -20,6 +20,10 @@ public final class PixelModel {
             {4, 12, 4, 0, 16, -4, 12, 2},  // right leg
             {4, 12, 4, 16, 48, 0, 12, 2},  // left leg
     };
+    /** Box size (w, h, d) in pixels of every part. */
+    public static final int[][] DIM = {{8, 8, 8}, {8, 12, 4}, {4, 12, 4}, {4, 12, 4}, {4, 12, 4}, {4, 12, 4}};
+    /** Centre of every part in character space (pixels), standing pose. */
+    public static final float[][] CEN = {{0, 28, 0}, {0, 18, 0}, {-6, 18, 0}, {6, 18, 0}, {-2, 6, 0}, {2, 6, 0}};
     public static final float[][] PIVOT = {
             {0, 24, 0}, {0, 12, 0}, {-6, 22, 0}, {6, 22, 0}, {-2, 12, 0}, {2, 12, 0}
     };

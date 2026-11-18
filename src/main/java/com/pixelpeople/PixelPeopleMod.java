@@ -42,7 +42,7 @@ public class PixelPeopleMod {
     private static void handleHit(HitPayload p, IPayloadContext ctx) {
         Entity e = ctx.player().level().getEntity(p.entityId());
         if (e instanceof PixelPerson pp) {
-            pp.clientHit(p.cubes(), new Vec3(p.dx(), p.dy(), p.dz()), p.strength());
+            pp.clientHit(p.cubes(), new Vec3(p.dx(), p.dy(), p.dz()), p.strength(), new Vec3(p.hx(), p.hy(), p.hz()));
         }
     }
 

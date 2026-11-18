@@ -40,6 +40,7 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.network.PacketDistributor;
 import org.joml.Matrix4f;
+import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 /**
@@ -77,9 +78,19 @@ public class PixelPerson extends PathfinderMob {
     public final float[] sx = new float[6], sz = new float[6], sxO = new float[6], szO = new float[6];
     private final float[] vx = new float[6], vz = new float[6];
     public final List<Debris> debris = new ArrayList<>();
-    private static final Matrix4f[] SCRATCH = new Matrix4f[PixelModel.PARTS];
+    // ---- physics ragdoll (client) ----
+    /** Rigid-body ragdoll that runs while the person is knocked down. */
+    public RagdollPhysics phys;
+    private boolean physLive;
+    private final java.util.HashMap<Long, Boolean> solidCache = new java.util.HashMap<>();
+    private final BlockPos.MutableBlockPos mpos = new BlockPos.MutableBlockPos();
+    private Vec3 pendPos = Vec3.ZERO, pendDir = Vec3.ZERO;
+    private float pendStrength;
+    private int pendTick = -1000;
+    private static final Matrix4f[] SCR = new Matrix4f[PixelModel.PARTS];
+    private static final Matrix4f[] RM = new Matrix4f[PixelModel.PARTS];
     static {
-        for (int i = 0; i < SCRATCH.length; i++) SCRATCH[i] = new Matrix4f();
+        for (int i = 0; i < SCR.length; i++) { SCR[i] = new Matrix4f(); RM[i] = new Matrix4f(); }
     }
 
     public PixelPerson(EntityType<? extends PathfinderMob> type, Level level) {
@@ -253,7 +264,8 @@ public class PixelPerson extends PathfinderMob {
         }
 
         PacketDistributor.sendToPlayersTrackingEntity(this,
-                new HitPayload(getId(), cubes, (float) dir.x, (float) dir.y, (float) dir.z, strength));
+                new HitPayload(getId(), cubes, (float) dir.x, (float) dir.y, (float) dir.z, strength,
+                        (float) pos.x, (float) pos.y, (float) pos.z));
     }
 
     @Override
@@ -267,7 +279,8 @@ public class PixelPerson extends PathfinderMob {
                 detached.set(i);
             }
             PacketDistributor.sendToPlayersTrackingEntity(this,
-                    new HitPayload(getId(), all, (float) dir.x, (float) dir.y, (float) dir.z, 3f));
+                    new HitPayload(getId(), all, (float) dir.x, (float) dir.y, (float) dir.z, 3f,
+                    (float) getX(), (float) (getY() + 0.9), (float) getZ()));
         }
         super.die(source);
     }
@@ -389,25 +402,34 @@ public class PixelPerson extends PathfinderMob {
         detached.or(BitSet.valueOf(bits));
     }
 
-    public void clientHit(int[] cubes, Vec3 dir, float strength) {
+    public void clientHit(int[] cubes, Vec3 dir, float strength, Vec3 pos) {
         float keep = cubes.length > 250 ? 250f / cubes.length : 1f; // death: only some pixels become debris
+        computeRenderMatrices(1.0f, RM);
         for (int idx : cubes) {
             if (!detached.get(idx)) {
                 detached.set(idx);
-                if (keep >= 1f || random.nextFloat() < keep) spawnDebris(idx, dir, strength);
+                if (keep >= 1f || random.nextFloat() < keep) spawnDebris(idx, dir, strength, RM);
             }
         }
-        // jerk every limb: standing people flinch, lying people get tossed around like dolls
-        boolean lying = getState() != STANDING;
-        float k = lying ? 1.7f : 0.9f;
+        // the hit shoves the physics ragdoll; if it is not running yet (the knock-down is still
+        // on its way from the server) remember the hit and apply it when the ragdoll starts
+        if (getState() == DOWN && physLive && phys != null) {
+            physicsHit(pos, dir, strength);
+        } else {
+            pendPos = pos; pendDir = dir; pendStrength = strength; pendTick = tickCount;
+        }
+        // standing people flinch: jerk every limb
         for (int i = 0; i < 6; i++) {
-            vx[i] += (random.nextFloat() - 0.5f) * k * strength;
-            vz[i] += (random.nextFloat() - 0.5f) * k * strength;
+            vx[i] += (random.nextFloat() - 0.5f) * 0.9f * strength;
+            vz[i] += (random.nextFloat() - 0.5f) * 0.9f * strength;
         }
-        if (lying) {
-            bounceV += 1.2f * strength;
-            twistV += (random.nextFloat() - 0.5f) * 0.25f * strength;
-        }
+    }
+
+    private void physicsHit(Vec3 pos, Vec3 dir, float strength) {
+        int body = phys.nearestBody(pos.x, pos.y, pos.z);
+        double mag = 3.0 + 1.5 * strength;
+        phys.hit(body, pos.x, pos.y, pos.z,
+                dir.x * mag, Math.max(0.0, dir.y) * mag + 1.5 + strength, dir.z * mag, 0.6);
     }
 
     private void landed(float v) {
@@ -430,18 +452,16 @@ public class PixelPerson extends PathfinderMob {
 
         int st = getState();
         if (st == DOWN) {
-            // topple like a real body: gravity accelerates the fall, the ground makes it bounce
-            lieV += 0.05f;
-            lie += lieV;
-            if (lie >= 1f) {
-                lie = 1f;
-                boolean hard = lieV > 0.12f;
-                if (hard) landed(lieV);
-                lieV = hard ? -lieV * 0.3f : 0f;
-            }
+            // real rigid-body ragdoll; the scripted "lying" values are only the fallback / get-up start pose
+            if (!physLive || phys == null) initPhysics();
+            if (phys != null) stepPhysics();
+            lieV = 0f;
+            lie = 1f;
             sit = 0f;
-            drop = lie;
+            drop = 1f;
         } else if (st == GETTING_UP) {
+            physLive = false;
+            if (phys != null) phys.snapshotPrev(); // freeze: it is blended into the get-up animation
             lieV = 0f;
             float t = Math.min(1f, stateTicks / (float) GETUP_TICKS);
             if (isFaceDown()) {            // push up like a plank
@@ -458,6 +478,8 @@ public class PixelPerson extends PathfinderMob {
                 drop = sit;
             }
         } else {
+            phys = null;
+            physLive = false;
             lieV = 0f;
             lie = Math.max(0f, lie - 0.25f);
             sit = 0f;
@@ -498,20 +520,110 @@ public class PixelPerson extends PathfinderMob {
         tickDebris();
     }
 
-    private void spawnDebris(int idx, Vec3 dir, float strength) {
+    // ------------------------------------------------------------------ physics ragdoll glue
+
+    private void initPhysics() {
+        Matrix4f[] m = new Matrix4f[PixelModel.PARTS];
+        for (int i = 0; i < m.length; i++) m[i] = new Matrix4f();
+        scripted(1.0f, m);
+        double[][] pos = new double[PixelModel.PARTS][3], rot = new double[PixelModel.PARTS][4];
+        Vector3f c = new Vector3f();
+        Quaternionf q = new Quaternionf();
+        for (int i = 0; i < m.length; i++) {
+            c.set(PixelModel.CEN[i][0], PixelModel.CEN[i][1], PixelModel.CEN[i][2]);
+            m[i].transformPosition(c);
+            pos[i][0] = getX() + c.x; pos[i][1] = getY() + c.y; pos[i][2] = getZ() + c.z;
+            m[i].getNormalizedRotation(q);
+            rot[i][0] = q.x; rot[i][1] = q.y; rot[i][2] = q.z; rot[i][3] = q.w;
+        }
+        RagdollPhysics rp = new RagdollPhysics();
+        rp.init(pos, rot);
+        Vec3 mv = getDeltaMovement();
+        rp.setAllVelocity(mv.x * 20.0, mv.y * 20.0, mv.z * 20.0);
+        phys = rp;
+        physLive = true;
+        if (tickCount - pendTick <= 10) physicsHit(pendPos, pendDir, pendStrength);
+    }
+
+    private void stepPhysics() {
+        RagdollPhysics rp = phys;
+        rp.snapshotPrev();
+        solidCache.clear();
+        rp.step(this::solidAt);
+        RagdollPhysics.Body t = rp.b[PixelModel.BODY];
+        // keep the ragdoll near the (server controlled) hitbox
+        rp.shift((getX() - t.x[0]) * 0.05, 0.0, (getZ() - t.x[2]) * 0.05);
+        if (!rp.isFinite() || t.x[1] < getY() - 4.0) {
+            phys = null;
+            physLive = false;
+        }
+    }
+
+    private boolean solidAt(int x, int y, int z) {
+        long key = BlockPos.asLong(x, y, z);
+        Boolean cached = solidCache.get(key);
+        if (cached != null) return cached;
+        mpos.set(x, y, z);
+        BlockState s = level().getBlockState(mpos);
+        boolean r = !s.getCollisionShape(level(), mpos).isEmpty();
+        solidCache.put(key, r);
+        return r;
+    }
+
+    /** Pose of the body parts when no physics is involved (walking, flinching, getting up). */
+    private void scripted(float pt, Matrix4f[] out) {
+        PixelPose.compute(this, pt, SCR);
+        float yaw = Mth.rotLerp(pt, yBodyRotO, yBodyRot) * Mth.DEG_TO_RAD;
+        for (int i = 0; i < out.length; i++) {
+            out[i].identity().rotateY(-yaw).scale(PixelModel.SCALE).mul(SCR[i]);
+        }
+    }
+
+    /**
+     * Matrices that map a part's character-space pixel coordinates to the entity's render space (blocks),
+     * for the renderer and for the debris spawner: walking pose, physics ragdoll, or the blend of the two
+     * while getting up.
+     */
+    public void computeRenderMatrices(float pt, Matrix4f[] out) {
+        scripted(pt, out);
+        int st = getState();
+        if (phys == null || st == STANDING) return;
+        float w = st == GETTING_UP ? smooth((stateTicks + pt) / 10f) : 0f; // 0 = pure physics
+        if (w >= 1f) return;
+        double ex = Mth.lerp(pt, xo, getX()), ey = Mth.lerp(pt, yo, getY()), ez = Mth.lerp(pt, zo, getZ());
+        for (int i = 0; i < PixelModel.PARTS; i++) {
+            RagdollPhysics.Body b = phys.b[i];
+            float x = (float) (Mth.lerp(pt, b.ox[0], b.x[0]) - ex);
+            float y = (float) (Mth.lerp(pt, b.ox[1], b.x[1]) - ey);
+            float z = (float) (Mth.lerp(pt, b.ox[2], b.x[2]) - ez);
+            Quaternionf q = new Quaternionf((float) b.oq[0], (float) b.oq[1], (float) b.oq[2], (float) b.oq[3])
+                    .nlerp(new Quaternionf((float) b.q[0], (float) b.q[1], (float) b.q[2], (float) b.q[3]), pt);
+            float[] c = PixelModel.CEN[i];
+            Matrix4f pm = new Matrix4f().translate(x, y, z).rotate(q).scale(PixelModel.SCALE).translate(-c[0], -c[1], -c[2]);
+            if (w <= 0f) {
+                out[i].set(pm);
+            } else {
+                Vector3f oa = pm.transformPosition(new Vector3f());
+                Vector3f ob = out[i].transformPosition(new Vector3f());
+                Quaternionf qa = pm.getNormalizedRotation(new Quaternionf());
+                Quaternionf qb = out[i].getNormalizedRotation(new Quaternionf());
+                qa.slerp(qb, w);
+                oa.lerp(ob, w);
+                out[i].identity().translate(oa).rotate(qa).scale(PixelModel.SCALE);
+            }
+        }
+    }
+
+    private void spawnDebris(int idx, Vec3 dir, float strength, Matrix4f[] m) {
         if (debris.size() >= 500) return;
-        PixelPose.compute(this, 1.0f, SCRATCH);
         Vector3f p = new Vector3f(PixelModel.CX[idx], PixelModel.CY[idx], PixelModel.CZ[idx]);
-        SCRATCH[PixelModel.PART[idx]].transformPosition(p);
-        double yaw = Math.toRadians(yBodyRot);
-        double cos = Math.cos(yaw), sin = Math.sin(yaw);
-        double s = PixelModel.SCALE;
+        m[PixelModel.PART[idx]].transformPosition(p);
 
         Debris d = new Debris();
         d.cube = idx;
-        d.x = d.xo = getX() + (p.x * cos - p.z * sin) * s;
-        d.y = d.yo = getY() + p.y * s;
-        d.z = d.zo = getZ() + (p.x * sin + p.z * cos) * s;
+        d.x = d.xo = getX() + p.x;
+        d.y = d.yo = getY() + p.y;
+        d.z = d.zo = getZ() + p.z;
         double k = 0.10 * strength;
         d.vx = dir.x * k + (random.nextDouble() - 0.5) * 0.12;
         d.vy = Math.max(0.0, dir.y) * k + 0.05 + random.nextDouble() * 0.10;

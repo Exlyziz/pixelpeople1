@@ -12,6 +12,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
 /**
  * Draws the solid pixel body. A face is drawn when nothing is attached next to it:
@@ -27,6 +28,9 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
     static {
         for (int i = 0; i < MATS.length; i++) MATS[i] = new Matrix4f();
     }
+
+    private static final Vector3f V = new Vector3f();
+    private static final Quaternionf Q = new Quaternionf();
 
     // face normal and the two tangent axes of each face
     private static final float[][] N  = {{0,0,1},{0,0,-1},{-1,0,0},{1,0,0},{0,1,0},{0,-1,0}};
@@ -79,15 +83,15 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
             ps.popPose();
         }
 
-        // ---- the body ----
-        float bodyYaw = Mth.rotLerp(pt, e.yBodyRotO, e.yBodyRot);
-        ps.pushPose();
-        ps.mulPose(Axis.YP.rotationDegrees(-bodyYaw));
-        ps.scale(s, s, s);
-        PixelPose.compute(e, pt, MATS);
+        // ---- the body (walking pose, physics ragdoll, or the blend while getting up) ----
+        e.computeRenderMatrices(pt, MATS);
         for (int p = 0; p < PixelModel.PARTS; p++) {
             ps.pushPose();
-            ps.mulPose(MATS[p]);
+            MATS[p].transformPosition(V.set(0f, 0f, 0f));
+            MATS[p].getNormalizedRotation(Q);
+            ps.translate(V.x, V.y, V.z);
+            ps.mulPose(Q);
+            ps.scale(s, s, s);
             PoseStack.Pose pose = ps.last();
             for (int i = PixelModel.START[p]; i < PixelModel.START[p + 1]; i++) {
                 if (e.detached.get(i)) continue;
@@ -105,7 +109,6 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
             }
             ps.popPose();
         }
-        ps.popPose();
     }
 
     private static void face(VertexConsumer vc, PoseStack.Pose pose, float x, float y, float z,
