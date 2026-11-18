@@ -4,7 +4,9 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.CreativeModeTabs;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.config.ModConfig;
 import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
 import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
@@ -15,7 +17,8 @@ import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 public class PixelPeopleMod {
     public static final String MODID = "pixelpeople";
 
-    public PixelPeopleMod(IEventBus modBus) {
+    public PixelPeopleMod(IEventBus modBus, ModContainer container) {
+        container.registerConfig(ModConfig.Type.COMMON, Config.SPEC);
         ModEntities.ENTITIES.register(modBus);
         ModItems.ITEMS.register(modBus);
         modBus.addListener(this::onAttributes);

@@ -11,6 +11,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
@@ -58,6 +59,8 @@ public class PixelPerson extends PathfinderMob {
             SynchedEntityData.defineId(PixelPerson.class, EntityDataSerializers.BOOLEAN);
     private static final EntityDataAccessor<Integer> DATA_TRAIT =
             SynchedEntityData.defineId(PixelPerson.class, EntityDataSerializers.INT);
+    private static final EntityDataAccessor<Boolean> DATA_SABLE =
+            SynchedEntityData.defineId(PixelPerson.class, EntityDataSerializers.BOOLEAN);
 
     /** Cubes that are no longer attached (kept on server, mirrored on clients through packets). */
     public final BitSet detached = new BitSet(PixelModel.COUNT);
@@ -66,6 +69,7 @@ public class PixelPerson extends PathfinderMob {
     private int lastHitTick;
     private int getUpTicks;
     private boolean traitSet;
+    private boolean sableDriven;
     private DamageSource pendingSource;
 
     // ---- client-only animation state ----
@@ -99,7 +103,7 @@ public class PixelPerson extends PathfinderMob {
 
     public static AttributeSupplier.Builder createAttributes() {
         return Mob.createMobAttributes()
-                .add(Attributes.MAX_HEALTH, 20.0)
+                .add(Attributes.MAX_HEALTH, 80.0)
                 .add(Attributes.MOVEMENT_SPEED, 0.25)
                 .add(Attributes.ATTACK_DAMAGE, 2.0)
                 .add(Attributes.FOLLOW_RANGE, 24.0);
@@ -111,6 +115,7 @@ public class PixelPerson extends PathfinderMob {
         builder.define(DATA_STATE, STANDING);
         builder.define(DATA_FACE_DOWN, false);
         builder.define(DATA_TRAIT, CALM);
+        builder.define(DATA_SABLE, false);
     }
 
     // ------------------------------------------------------------------ AI
@@ -139,6 +144,8 @@ public class PixelPerson extends PathfinderMob {
     public int getState() { return entityData.get(DATA_STATE); }
     public boolean isFaceDown() { return entityData.get(DATA_FACE_DOWN); }
     public int getTrait() { return entityData.get(DATA_TRAIT); }
+    /** True while the Sable: Player Ragdoll mod owns the ragdoll (it draws the body, not us). */
+    public boolean isSableDriven() { return entityData.get(DATA_SABLE); }
 
     private void setState(int s) {
         if (getState() != s) {
@@ -213,6 +220,28 @@ public class PixelPerson extends PathfinderMob {
             traitSet = true;
         }
         int st = getState();
+        if (Config.USE_SABLE.get() && SableBridge.available()) {
+            if (sableDriven) {
+                if (tickCount - lastHitTick > 10 && !SableBridge.isRagdolled(this)) {
+                    sableDriven = false;                       // Sable finished: stand up with our own animation
+                    entityData.set(DATA_SABLE, false);
+                    getUpTicks = 0;
+                    setState(GETTING_UP);
+                } else if (tickCount - lastHitTick >= Math.max(recoverDelay(), 40)) {
+                    SableBridge.release(this);                 // not hit for a while: let it get up
+                }
+                return;
+            }
+            if (st != GETTING_UP && SableBridge.isRagdolled(this)) {
+                // some other mod (Ragdoll Reactions) ragdolled us: follow it
+                sableDriven = true;
+                entityData.set(DATA_SABLE, true);
+                entityData.set(DATA_FACE_DOWN, false);
+                lastHitTick = tickCount;
+                setState(DOWN);
+                return;
+            }
+        }
         if (st == DOWN && tickCount - lastHitTick >= recoverDelay()) {
             getUpTicks = 0;
             setState(GETTING_UP);
@@ -252,20 +281,30 @@ public class PixelPerson extends PathfinderMob {
                 || source.getDirectEntity() instanceof Projectile;
         int st = getState();
         if (st == STANDING) {
-            if (heavy) {
-                Vec3 fwd = Vec3.directionFromRotation(0f, yBodyRot);
-                entityData.set(DATA_FACE_DOWN, dir.dot(fwd) > 0.3);
-                lastHitTick = tickCount;
-                setState(DOWN);
-            }
+            if (heavy) knockDown(dir, strength);
         } else {
             lastHitTick = tickCount; // still being hit: stay limp
-            if (st == GETTING_UP) setState(DOWN);
+            if (st == GETTING_UP) knockDown(dir, strength);
         }
 
         PacketDistributor.sendToPlayersTrackingEntity(this,
                 new HitPayload(getId(), cubes, (float) dir.x, (float) dir.y, (float) dir.z, strength,
                         (float) pos.x, (float) pos.y, (float) pos.z));
+    }
+
+    private void knockDown(Vec3 dir, float strength) {
+        Vec3 fwd = Vec3.directionFromRotation(0f, yBodyRot);
+        entityData.set(DATA_FACE_DOWN, dir.dot(fwd) > 0.3);
+        lastHitTick = tickCount;
+        boolean sable = false;
+        if (Config.USE_SABLE.get() && SableBridge.available() && level() instanceof ServerLevel sl) {
+            Vec3 spin = new Vec3(random.nextDouble() - 0.5, random.nextDouble() - 0.5, random.nextDouble() - 0.5).scale(10.0);
+            sable = SableBridge.isRagdolled(this)
+                    || SableBridge.launch(sl, this, new Vec3(dir.x, 0.35, dir.z).normalize().scale(5.0 + 1.5 * strength), spin);
+        }
+        sableDriven = sable;
+        entityData.set(DATA_SABLE, sable);
+        setState(DOWN);
     }
 
     @Override
@@ -453,8 +492,13 @@ public class PixelPerson extends PathfinderMob {
         int st = getState();
         if (st == DOWN) {
             // real rigid-body ragdoll; the scripted "lying" values are only the fallback / get-up start pose
-            if (!physLive || phys == null) initPhysics();
-            if (phys != null) stepPhysics();
+            if (isSableDriven()) {
+                phys = null;
+                physLive = false;
+            } else {
+                if (!physLive || phys == null) initPhysics();
+                if (phys != null) stepPhysics();
+            }
             lieV = 0f;
             lie = 1f;
             sit = 0f;

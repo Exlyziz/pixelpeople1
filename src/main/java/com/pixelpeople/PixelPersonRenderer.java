@@ -20,7 +20,7 @@ import org.joml.Vector3f;
  */
 public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
     private static final ResourceLocation SKIN =
-            ResourceLocation.fromNamespaceAndPath(PixelPeopleMod.MODID, "textures/entity/pixel_person.png");
+            ResourceLocation.fromNamespaceAndPath("minecraft", "textures/entity/player/wide/steve.png");
     private static final ResourceLocation FLESH =
             ResourceLocation.fromNamespaceAndPath(PixelPeopleMod.MODID, "textures/entity/flesh.png");
 
@@ -82,6 +82,8 @@ public class PixelPersonRenderer extends EntityRenderer<PixelPerson> {
             }
             ps.popPose();
         }
+
+        if (e.isSableDriven()) return; // the Sable ragdoll draws the body; only the flying pixels are ours
 
         // ---- the body (walking pose, physics ragdoll, or the blend while getting up) ----
         e.computeRenderMatrices(pt, MATS);
